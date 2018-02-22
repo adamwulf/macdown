@@ -211,7 +211,8 @@ typedef NS_ENUM(NSUInteger, MPWordCountType) {
 @property (nonatomic) BOOL needsToUnregister;
 @property (nonatomic) BOOL alreadyRenderingInWeb;
 @property (nonatomic) BOOL renderToWebPending;
-@property (nonatomic) void(^lastExportOperation)(void);
+@property (nonatomic) void(^lastHtmlExportOperation)(void);
+@property (nonatomic) void(^lastPdfExportOperation)(void);
 
 // Store file content in initializer until nib is loaded.
 @property (copy) NSString *loadedString;
@@ -643,8 +644,11 @@ static void (^MPGetPreviewLoadingCompletionHandler(MPDocument *doc))()
 {
     BOOL result = [super validateUserInterfaceItem:item];
     SEL action = item.action;
-    if (action == @selector(exportAgain:)){
-        result = self.lastExportOperation != nil;
+    if (action == @selector(exportHtmlAgain:)){
+        result = self.lastHtmlExportOperation != nil;
+    }
+    if (action == @selector(exportPdfAgain:)){
+        result = self.lastPdfExportOperation != nil;
     }
     if (action == @selector(toggleToolbar:))
     {
@@ -1205,10 +1209,17 @@ static void (^MPGetPreviewLoadingCompletionHandler(MPDocument *doc))()
     [pasteboard writeObjects:@[self.renderer.currentHtml]];
 }
 
-- (IBAction)exportAgain:(id)sender
+- (IBAction)exportHtmlAgain:(id)sender
 {
-    if(self.lastExportOperation){
-        self.lastExportOperation();
+    if(self.lastHtmlExportOperation){
+        self.lastHtmlExportOperation();
+    }
+}
+
+- (IBAction)exportPdfAgain:(id)sender
+{
+    if(self.lastPdfExportOperation){
+        self.lastPdfExportOperation();
     }
 }
 
@@ -1234,7 +1245,7 @@ static void (^MPGetPreviewLoadingCompletionHandler(MPDocument *doc))()
         NSURL *exportURL = panel.URL;
         
         __weak MPDocument *weakSelf = self;
-        self.lastExportOperation = ^{
+        self.lastHtmlExportOperation = ^{
             MPDocument *strongSelf = weakSelf;
             NSString *html = [strongSelf.renderer HTMLForExportWithStyles:styles
                                                              highlighting:highlighting];
@@ -1242,7 +1253,7 @@ static void (^MPGetPreviewLoadingCompletionHandler(MPDocument *doc))()
                        error:NULL];
         };
         
-        self.lastExportOperation();
+        self.lastHtmlExportOperation();
     }];
 }
 
@@ -1268,13 +1279,13 @@ static void (^MPGetPreviewLoadingCompletionHandler(MPDocument *doc))()
         };
         
         __weak MPDocument *weakSelf = self;
-        self.lastExportOperation = ^{
+        self.lastPdfExportOperation = ^{
             MPDocument *strongSelf = weakSelf;
             [strongSelf printDocumentWithSettings:settings showPrintPanel:NO delegate:nil
                                  didPrintSelector:NULL contextInfo:NULL];
         };
         
-        self.lastExportOperation();
+        self.lastPdfExportOperation();
     }];
 }
 
