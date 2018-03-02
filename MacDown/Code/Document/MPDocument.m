@@ -29,7 +29,7 @@
 #import "MPMathJaxListener.h"
 #import "WebView+WebViewPrivateHeaders.h"
 #import "MPToolbarController.h"
-
+@import JavaScriptCore;
 
 static NSString * const kMPDefaultAutosaveName = @"Untitled";
 
@@ -172,7 +172,7 @@ NS_INLINE NSColor *MPGetWebViewBackgroundColor(WebView *webview)
 @interface MPDocument ()
     <NSSplitViewDelegate, NSTextViewDelegate,
 #if __MAC_OS_X_VERSION_MAX_ALLOWED >= 101100
-     WebEditingDelegate, WebFrameLoadDelegate, WebPolicyDelegate,WebResourceLoadDelegate,
+     WebEditingDelegate, WebFrameLoadDelegate, WebPolicyDelegate, WebResourceLoadDelegate,
 #endif
      MPAutosaving, MPRendererDataSource, MPRendererDelegate>
 
@@ -828,14 +828,16 @@ static void (^MPGetPreviewLoadingCompletionHandler(MPDocument *doc))()
 
 #pragma mark - WebResourceLoadDelegate
 
-- (NSURLRequest *)webView:(WebView *)sender resource:(id)identifier willSendRequest:(NSURLRequest *)request redirectResponse:(NSURLResponse *)redirectResponse fromDataSource:(WebDataSource *)dataSource{
+- (NSURLRequest *)webView:(WebView *)sender resource:(id)identifier willSendRequest:(NSURLRequest *)request redirectResponse:(NSURLResponse *)redirectResponse fromDataSource:(WebDataSource *)dataSource
+{
     
-    if([[request.URL lastPathComponent] isEqualToString:@"MathJax.js"]){
+    if ([[request.URL lastPathComponent] isEqualToString:@"MathJax.js"])
+    {
         NSURLComponents *origComps = [NSURLComponents componentsWithURL:[request URL] resolvingAgainstBaseURL:YES];
         NSURLComponents *updatedComps = [NSURLComponents componentsWithURL:[[NSBundle mainBundle] URLForResource:@"MathJax" withExtension:@"js" subdirectory:@"MathJax"] resolvingAgainstBaseURL:NO];
         [updatedComps setQueryItems:[origComps queryItems]];
         
-        request = [NSMutableURLRequest requestWithURL:[updatedComps URL]];
+        request = [NSURLRequest requestWithURL:[updatedComps URL]];
     }
     
     return request;
@@ -1037,7 +1039,8 @@ static void (^MPGetPreviewLoadingCompletionHandler(MPDocument *doc))()
 
 - (void)renderer:(MPRenderer *)renderer didProduceHTMLOutput:(NSString *)html
 {
-    if (self.alreadyRenderingInWeb){
+    if (self.alreadyRenderingInWeb)
+    {
         self.renderToWebPending = YES;
         return;
     }
@@ -1703,24 +1706,101 @@ static void (^MPGetPreviewLoadingCompletionHandler(MPDocument *doc))()
 
 - (void)syncScrollers
 {
-    NSRect contentBounds = [self.editor.enclosingScrollView.contentView bounds];
-    NSRect realContentRect = self.editor.contentRect;
-
-    CGFloat ratio = 0.0;
-    if (realContentRect.size.height > contentBounds.size.height)
+    NSLayoutManager *layoutManager = [self.editor layoutManager];
+    NSArray<NSString *> *documentLines = [self.editor.string componentsSeparatedByString:@"\n"];
+    CGFloat editorContentHeight = ceilf(NSHeight(self.editor.enclosingScrollView.documentView.bounds));
+    CGFloat editorVisibleHeight = ceilf(NSHeight(self.editor.enclosingScrollView.contentView.bounds));
+    CGFloat previewContentHeight = ceilf(NSHeight(self.preview.enclosingScrollView.documentView.bounds));
+    CGFloat previewVisibleHeight = ceilf(NSHeight(self.preview.enclosingScrollView.contentView.bounds));
+    NSInteger relativeHeaderIndex = -1; // -1 is start of document, before any other header
+    NSInteger characterCount = 0;
+    CGFloat currY = NSMinY(self.editor.enclosingScrollView.contentView.bounds);
+    CGFloat minY = 0;
+    CGFloat maxY = 0;
+    
+    // These are the patterns for markdown headers and images respectively. we're only going to
+    // handle images that are not inline with other text/images
+    NSRegularExpression *dashRegex = [NSRegularExpression regularExpressionWithPattern:@"^([-]+)$" options:0 error:nil];
+    NSRegularExpression *headerRegex = [NSRegularExpression regularExpressionWithPattern:@"^(#+)\\s" options:0 error:nil];
+    NSRegularExpression *imgRegex = [NSRegularExpression regularExpressionWithPattern:@"^!\\[[^\\]]*\\]\\([^)]*\\)$" options:0 error:nil];
+    BOOL previousLineHadContent = NO;
+    
+    // We start by splitting our document into lines, and then searching
+    // line by line for headers or images.
+    for (NSInteger lineNumber = 0; lineNumber < [documentLines count]; lineNumber++)
     {
-        ratio = contentBounds.origin.y /
-            (realContentRect.size.height - contentBounds.size.height);
+        NSString *line = documentLines[lineNumber];
+        
+        if ((previousLineHadContent && [dashRegex numberOfMatchesInString:line options:0 range:NSMakeRange(0, [line length])]) ||
+            [imgRegex numberOfMatchesInString:line options:0 range:NSMakeRange(0, [line length])] ||
+            [headerRegex numberOfMatchesInString:line options:0 range:NSMakeRange(0, [line length])])
+        {
+            // Calculate where this header/image appears vertically in the editor
+            NSRange glyphRange = [layoutManager glyphRangeForCharacterRange:NSMakeRange(characterCount, [line length]) actualCharacterRange:nil];
+            NSRect topRect = [layoutManager boundingRectForGlyphRange:glyphRange inTextContainer:[self.editor textContainer]];
+            CGFloat headerY = NSMidY(topRect);
+            
+            if (headerY < currY)
+            {
+                // The header is before our current scroll position. the closest
+                // of these will be our first reference node
+                relativeHeaderIndex += 1;
+                minY = headerY;
+            } else if (maxY == 0 && headerY < editorContentHeight - editorVisibleHeight)
+            {
+                // Skip any headers that are within the last screen of the editor.
+                // we'll interpolate to the end of the document in that case.
+                maxY = headerY;
+            }
+        }
+        
+        previousLineHadContent = [line length] && ![dashRegex numberOfMatchesInString:line options:0 range:NSMakeRange(0, [line length])];
+        
+        characterCount += [line length] + 1;
     }
-
-    NSScrollView *previewScrollView = self.preview.enclosingScrollView;
-    NSClipView *previewContentView = previewScrollView.contentView;
-    NSView *previewDocumentView = previewScrollView.documentView;
-    NSRect previewContentBounds = previewContentView.bounds;
-    previewContentBounds.origin.y =
-        ratio * (previewDocumentView.frame.size.height
-                 - previewContentBounds.size.height);
-    previewContentView.bounds = previewContentBounds;
+    
+    // Usually, we'll be scrolling between two reference nodes, but toward the end
+    // of the document we'll ignore nodes and reference the end of the document instead
+    BOOL interpolateToEndOfDocument = NO;
+    
+    if (maxY == 0)
+    {
+        // We only have a reference node before our current position,
+        // but not after, so we'll use the end of the document.
+        maxY = editorContentHeight - editorVisibleHeight;
+        interpolateToEndOfDocument = YES;
+    }
+    
+    // We are currently at currY offset, between minY and maxY, which represent
+    // headers indexed by relativeHeaderIndex and relativeHeaderIndex+1.
+    currY = MAX(0, currY - minY);
+    maxY -= minY;
+    minY -= minY;
+    CGFloat percentScrolledBetweenHeaders = MAX(0, MIN(1.0, currY / maxY));
+    
+    // Now that we know where the editor position is relative to two reference nodes,
+    // we need to find the positions of those nodes in the HTML preview
+    NSArray<NSNumber*> *headerLocations = [[self.preview.mainFrame.javaScriptContext evaluateScript:@"var arr = Array.prototype.slice.call(document.querySelectorAll(\"h1, h2, h3, h4, h5, h6, img:only-child\")); arr.map(function(n){ return n.getBoundingClientRect().top })"] toArray];
+    CGFloat offset = NSMinY(self.preview.enclosingScrollView.contentView.bounds);
+    CGFloat topHeaderY = 0;
+    CGFloat bottomHeaderY = previewContentHeight - previewVisibleHeight;
+    
+    // Find the Y positions in the preview window that we're scrolling between
+    if ([headerLocations count] > relativeHeaderIndex)
+    {
+        topHeaderY = floorf([headerLocations[relativeHeaderIndex] doubleValue] + offset);
+    }
+    
+    if (!interpolateToEndOfDocument && [headerLocations count] > relativeHeaderIndex + 1)
+    {
+        bottomHeaderY = ceilf([headerLocations[relativeHeaderIndex + 1] doubleValue] + offset);
+    }
+    
+    // Now we scroll percentScrolledBetweenHeaders percent between those two positions in the webview
+    CGFloat previewY = topHeaderY + (bottomHeaderY - topHeaderY) * percentScrolledBetweenHeaders;
+    NSRect contentBounds = self.preview.enclosingScrollView.contentView.bounds;
+    contentBounds.origin.y = previewY;
+    self.preview.enclosingScrollView.contentView.bounds = contentBounds;
 }
 
 - (void)setSplitViewDividerLocation:(CGFloat)ratio
