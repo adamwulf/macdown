@@ -30,7 +30,9 @@
 #import "MPMathJaxListener.h"
 #import "WebView+WebViewPrivateHeaders.h"
 #import "MPToolbarController.h"
+#import "MPLayoutManager.h"
 #import <JavaScriptCore/JavaScriptCore.h>
+
 
 static NSString * const kMPDefaultAutosaveName = @"Untitled";
 
@@ -283,6 +285,11 @@ static void (^MPGetPreviewLoadingCompletionHandler(MPDocument *doc))()
     return self.windowForSheet.toolbar.visible;
 }
 
+-(BOOL)invisiblesVisible
+{
+    return [[NSUserDefaults standardUserDefaults] boolForKey:@"ShowInvisibles"];
+}
+
 - (BOOL)previewVisible
 {
     return (self.preview.frame.size.width != 0.0);
@@ -364,6 +371,17 @@ static void (^MPGetPreviewLoadingCompletionHandler(MPDocument *doc))()
 
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
 
+    if([self invisiblesVisible]){
+        [self.editor.textContainer replaceLayoutManager:[[MPLayoutManager alloc] init]];
+    }else{
+        [self.editor.textContainer replaceLayoutManager:[[NSLayoutManager alloc] init]];
+    }
+    
+    CGFontRef font = CGFontCreateWithFontName(CFSTR("Menlo-Regular"));
+    for (size_t i = 0; i < CGFontGetNumberOfGlyphs(font); ++i) {
+        printf("%s\n", [CFBridgingRelease(CGFontCopyGlyphNameForGlyph(font, i)) UTF8String]);
+    }
+    
     // All files use their absolute path to keep their window states.
     NSString *autosaveName = kMPDefaultAutosaveName;
     if (self.fileURL)
@@ -657,13 +675,24 @@ static void (^MPGetPreviewLoadingCompletionHandler(MPDocument *doc))()
 {
     BOOL result = [super validateUserInterfaceItem:item];
     SEL action = item.action;
-    if (action == @selector(exportHtmlAgain:)){
+    if (action == @selector(exportHtmlAgain:))
+    {
         result = self.lastHtmlExportOperation != nil;
     }
-    if (action == @selector(exportPdfAgain:)){
+    else if (action == @selector(exportPdfAgain:))
+    {
         result = self.lastPdfExportOperation != nil;
     }
-    if (action == @selector(toggleToolbar:))
+    else if (action == @selector(toggleInvisibles:))
+    {
+        NSMenuItem *it = ((NSMenuItem *)item);
+        it.title = self.invisiblesVisible ?
+        NSLocalizedString(@"Hide Invisibles",
+                          @"Toggle reveal invisibles") :
+        NSLocalizedString(@"Show Invisibles",
+                          @"Toggle reveal invisibles");
+    }
+    else if (action == @selector(toggleToolbar:))
     {
         NSMenuItem *it = ((NSMenuItem *)item);
         it.title = self.toolbarVisible ?
@@ -1508,6 +1537,17 @@ static void (^MPGetPreviewLoadingCompletionHandler(MPDocument *doc))()
 - (IBAction)toggleToolbar:(id)sender
 {
     [self.windowForSheet toggleToolbarShown:sender];
+}
+
+- (IBAction)toggleInvisibles:(id)sender
+{
+    [[NSUserDefaults standardUserDefaults] setBool:![self invisiblesVisible] forKey:@"ShowInvisibles"];
+    
+    if([self invisiblesVisible]){
+        [self.editor.textContainer replaceLayoutManager:[[MPLayoutManager alloc] init]];
+    }else{
+        [self.editor.textContainer replaceLayoutManager:[[NSLayoutManager alloc] init]];
+    }
 }
 
 - (IBAction)togglePreviewPane:(id)sender
